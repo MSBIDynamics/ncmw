@@ -1,0 +1,5 @@
+# Tested on Python 3.13 (Windows)
+numpy==2.3.3
+pandas==2.3.3
+scipy==1.16.2
+cobra==0.29.1

@@ -12,7 +12,7 @@
         "editor.defaultFormatter": "ms-python.python",
         "editor.formatOnSave": true,
         "editor.codeActionsOnSave": {
-            "source.sortImports": true
+            "source.sortImports": "explicit"
         }, // OK as long as isort 3rd parties managed in setup.cfg?, see below
         "editor.wordWrapColumn": 88,
         "editor.renderWhitespace": "boundary",
@@ -73,12 +73,5 @@
     //
     // Signal that we are using shared workspace settings in .vscode
     "window.title": "sbi.vscode:: ${dirty}${activeEditorShort}${separator}${rootName}${separator}${appName}",
-<<<<<<< HEAD
-    "python.linting.pylintEnabled": true,
-    "python.linting.banditEnabled": false,
-    "python.linting.mypyEnabled": false,
-    "python.linting.pylamaEnabled": false,
-    "python.pythonPath": "D:\\Anaconda3\\python.exe"
-=======
->>>>>>> origin/main
+    "python.defaultInterpreterPath": "E:\\ncmw\\.venv\\Scripts\\python.exe"
 }

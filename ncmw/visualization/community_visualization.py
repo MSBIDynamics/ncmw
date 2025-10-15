@@ -38,7 +38,7 @@ def plot_reference_interaction(interaction_cutoff=0, cmap="viridis"):
                 G.add_edge(n1, n2, weight=weights[i, j])
                 edge_color.append(cmap2((weights[i, j])))
 
-    fig = plt.figure(figsize=(N, N - 2))
+    fig, ax = plt.subplots(figsize=(N, N - 2))          # [CHANGE 1]
     pos = circular_layout(G)
     nx.draw(
         G,
@@ -50,11 +50,13 @@ def plot_reference_interaction(interaction_cutoff=0, cmap="viridis"):
         edge_color=edge_color,
         width=3,
         connectionstyle="arc3, rad = 0.1",
+        ax=ax,                                         # [CHANGE 2]
     )
-    cbar = fig.colorbar(
-        matplotlib.cm.ScalarMappable(matplotlib.colors.Normalize(-1, 1), cmap=cmap2)
-    )
-    cbar.set_label("Interaction (Red=harmful, Blue=Benefitial)", rotation=270)
+    norm = matplotlib.colors.Normalize(vmin=-1, vmax=1)  # [CHANGE 3]
+    sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap2)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.8)
+    cbar.set_label("Interaction (Red=harmful, Blue=Beneficial)", rotation=270)
     cbar.set_ticks([-1, 0, 1])
 
     return fig
@@ -85,7 +87,7 @@ def plot_species_interaction(
                 G.add_edge(n1, n2, weight=weights[i, j])
                 edge_color.append(cmap2((weights[i, j] + 1) / 2))
 
-    fig = plt.figure(figsize=(len(model.models) * 2, 2 * len(model.models) - 2))
+    fig, ax = plt.subplots(figsize=(len(model.models) * 2, 2 * len(model.models) - 2))
     pos = circular_layout(G)
     nx.draw(
         G,
@@ -97,12 +99,13 @@ def plot_species_interaction(
         edge_color=edge_color,
         width=3,
         connectionstyle="arc3, rad = 0.1",
+        ax=ax,
     )
-    cbar = fig.colorbar(
-        matplotlib.cm.ScalarMappable(matplotlib.colors.Normalize(-1, 1), cmap=cmap2),
-        shrink=0.8,
-    )
-    cbar.set_label("Interaction (Red=harmful, Blue=Benefitial)", rotation=270)
+    norm = matplotlib.colors.Normalize(vmin=-1, vmax=1)
+    sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap2)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.8)
+    cbar.set_label("Interaction (Red=harmful, Blue=Beneficial)", rotation=270)
     cbar.set_ticks([-1, 0, 1])
     return fig
 

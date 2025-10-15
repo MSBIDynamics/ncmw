@@ -14,6 +14,9 @@ import sys, os
 import glob
 import pickle
 
+import tempfile, os
+from cobra.io import save_json_model, load_json_model
+
 STATUS_KEY = "__finished_run__"
 file_dir = os.path.dirname(os.path.dirname(__file__))
 sys.path.append(file_dir)
@@ -31,6 +34,19 @@ from ncmw.setup_models import *
 
 
 @hydra.main(config_path="../../data/hydra", config_name="config.yaml")
+
+def _safe_model_clone(model):
+    fd, path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    try:
+        save_json_model(model, path)
+        return load_json_model(path)
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
 def run_setup_hydra(cfg: DictConfig) -> None:
     run_setup(cfg)
 
@@ -154,7 +170,7 @@ def run_setup(cfg: DictConfig) -> None:
                 f"Set default configs {cfg.setup.configs} and medium {cfg.setup.medium} for {model_i.id}"
             )
             model = set_default_configs_and_snm3_medium(
-                model_i.copy(), cfg.setup.configs, cfg.setup.medium
+                _safe_model_clone(model_i), cfg.setup.configs, cfg.setup.medium
             )
         else:
             log.info(f"Keep model {model_i.id} as they are")

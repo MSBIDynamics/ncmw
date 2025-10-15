@@ -16,6 +16,18 @@ from .hierarchical_model_composition import generate_hierarchical_community_mode
 import pickle
 
 import pandas as pd
+import tempfile, os
+from cobra.io import save_json_model, load_json_model
+
+def _safe_model_clone(m):
+    fd, path = tempfile.mkstemp(suffix=".json"); os.close(fd)
+    try:
+        save_json_model(m, path)
+        return load_json_model(path)
+    finally:
+        try: os.remove(path)
+        except OSError: pass
+
 
 
 def create_stoichiometry_matrix(model):
@@ -142,7 +154,7 @@ class BagOfReactionsModel(CommunityModel):
             "Community__" + "".join([model.id + "__" for model in models])
         )
         self._type = "bag"
-        self.models = [deepcopy(m) for m in models]
+        self.models = [_safe_model_clone(m) for m in models]
         self.biomass_reactions = [get_biomass_reaction(model) for model in self.models]
         # Rename biomass reaction before merge
         for rec, model in zip(self.biomass_reactions, self.models):
@@ -154,7 +166,11 @@ class BagOfReactionsModel(CommunityModel):
         cobra_loger = logging.getLogger()
         cobra_loger.setLevel(logging.ERROR)
         for model in self.models:
-            self.community_model += model
+            tmp = _safe_model_clone(model)
+            existing_mets = {met.id for met in self.community_model.metabolites}
+            self.community_model.add_metabolites([m for m in tmp.metabolites if m.id not in existing_mets])
+            existing_rxns = {rxn.id for rxn in self.community_model.reactions}
+            self.community_model.add_reactions([r for r in tmp.reactions if r.id not in existing_rxns])
 
         cobra_loger.setLevel(logging.WARNING)
         for i in range(len(self.biomass_reactions)):
@@ -440,7 +456,7 @@ class BagOfReactionsModel(CommunityModel):
     def compute_convex_combination(self, alphas, maxbiomass=0.1):
         assert sum(alphas) == 1, "The weights must sum to one!"
         assert len(alphas) == len(self.models), "Scpecify a weight for each model..."
-        model = self.community_model.copy()
+        model = _safe_model_clone(self.community_model)
         biomass = [
             model.reactions.get_by_id(f.id).flux_expression
             for f in self.biomass_reactions
@@ -729,7 +745,7 @@ class ShuttleCommunityModel(BagOfReactionsModel):
                 shuttle_reaction.upper_bound = self.shuttle_reaction_upper_bound
                 shuttle_reaction.add_metabolites({met: 1, met2: -1})
                 shuttle_reactions.append(shuttle_reaction)
-                community_model.add_reaction(shuttle_reaction)
+                community_model.add_reactions([shuttle_reaction])
         # Add shuttle constraints!
         all_shuttles = [ex.id for ex in community_model.reactions if "SH_" == ex.id[:3]]
         shuttle_constraints = []
