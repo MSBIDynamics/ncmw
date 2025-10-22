@@ -32,8 +32,21 @@ from ncmw.utils.utils_io import (
 )
 from ncmw.setup_models import *
 
+import subprocess
 
-@hydra.main(config_path="../../data/hydra", config_name="config.yaml")
+def run_memote_with_current_python(model_xml: str, out_html: str, timeout_s: int):
+    """
+    Run memote with the *current* Python interpreter to avoid picking up a global memote.exe.
+    """
+    cmd = [
+        sys.executable, "-m", "memote", "run",
+        "--filename", out_html,
+        "--pytest-args", f"--timeout={timeout_s}",
+        model_xml,
+    ]
+    # start the process (non-blocking, like the previous code)
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
 
 def _safe_model_clone(model):
     fd, path = tempfile.mkstemp(suffix=".json")
@@ -47,6 +60,81 @@ def _safe_model_clone(model):
         except OSError:
             pass
 
+# --- BEGIN: LP name sanitizer ---
+# Certain names break LP format parsers (Gurobi/CPLEX/GLPK) when models are
+# pickled across processes. We rename only the conflicting IDs.
+_LP_RESERVED = {
+    "st", "subject to", "bounds", "end",
+    "general", "binaries", "binary", "integers",
+    "maximize", "minimize", "s.t."
+}
+
+def _sanitize_lp_reserved_names(model):
+    """
+    Rename reactions/metabolites/genes whose IDs collide with LP reserved words.
+    Keeps behavior identical across solvers.
+    """
+    log = logging.getLogger(__name__)
+    renamed = []
+
+    def _maybe_rename(obj, suffix):
+        oid = obj.id
+        if oid.lower() in _LP_RESERVED or oid in {"St", "ST"}:
+            new_id = f"{oid}_{suffix}"
+            obj.id = new_id
+            renamed.append((oid, new_id))
+
+    for rxn in model.reactions:
+        _maybe_rename(rxn, "rxn")
+    for met in model.metabolites:
+        _maybe_rename(met, "met")
+    for gene in getattr(model, "genes", []):
+        _maybe_rename(gene, "gene")
+
+    if renamed:
+        log.warning(
+            "Sanitized %d LP-reserved IDs: %s",
+            len(renamed), ", ".join([f"{o}->{n}" for o, n in renamed])
+        )
+    return model
+# --- END: LP name sanitizer ---
+
+
+# ---- Read primal flux values from the solver without constructing a COBRA Solution ----
+def _primal_fluxes(model):
+    """Return {reaction_id: flux} using solver primal values only."""
+    fluxes = {}
+    # ensure we have a current solver solution
+    try:
+        model.solver.optimize()
+    except Exception:
+        pass
+    for rxn in model.reactions:
+        # Combine forward and reverse primals: v = v_fwd - v_rev
+        val = 0.0
+        try:
+            fwd = getattr(rxn, "forward_variable", None)
+            rev = getattr(rxn, "reverse_variable", None)
+            if fwd is not None:
+                try:
+                    if fwd.primal is not None:
+                        val += float(fwd.primal)
+                except Exception:
+                    pass
+            if rev is not None:
+                try:
+                    if rev.primal is not None:
+                        val -= float(rev.primal)
+                except Exception:
+                    pass
+        except Exception:
+            # keep val at 0.0 if anything goes wrong for this reaction
+            pass
+        fluxes[rxn.id] = val
+    return fluxes
+
+        
+@hydra.main(config_path="../../data/hydra", config_name="config.yaml")
 def run_setup_hydra(cfg: DictConfig) -> None:
     run_setup(cfg)
 
@@ -176,6 +264,9 @@ def run_setup(cfg: DictConfig) -> None:
             log.info(f"Keep model {model_i.id} as they are")
             model = model_i
 
+        # <<< IMPORTANT: sanitize IDs that collide with LP reserved words >>>
+        model = _sanitize_lp_reserved_names(model)
+
         growth = model.slim_optimize()
         log.info(f"Growth on medium: {growth}")
         if growth < cfg.eps:
@@ -267,8 +358,8 @@ def run_setup(cfg: DictConfig) -> None:
             ):
                 log.info(f"Already done memote report for {model.id}")
                 continue
-            p = score_memote(
-                file, out_file, solver_timout=str(cfg.setup.memote_solver_time_out)
+            p = run_memote_with_current_python(
+                file, out_file, timeout_s=int(cfg.setup.memote_solver_time_out)
             )
 
             if (i % 5) == 0:

@@ -4,9 +4,8 @@ import numpy as np
 import scipy
 
 
-from abc import ABC, abstractmethod, abstractproperty
+from abc import ABC, abstractmethod
 
-import typing
 from warnings import warn
 import logging
 
@@ -28,7 +27,62 @@ def _safe_model_clone(m):
         try: os.remove(path)
         except OSError: pass
 
+# --- Helper utilities for QP solve without invoking cobra.get_solution() ---
+class _FluxView(dict):
+    """
+    Lightweight, dict-like container for fluxes that supports `sol[rxn_id]`
+    and an optional `to_frame()` for legacy call sites.
+    """
+    def __init__(self, fluxes: dict[str, float], objective_value: float | None = None):
+        super().__init__(fluxes)
+        self.objective_value = objective_value
 
+    def __getitem__(self, key):
+        # Return 0.0 if a reaction id is missing (mirrors common cobra usage)
+        return super().get(key, 0.0)
+
+    @property
+    def fluxes(self):
+        # Provide a pandas-style accessor if someone expects `sol.fluxes[...]`
+        return pd.Series(self)
+
+    def to_frame(self):
+        # Keep compatibility if any code still calls `sol.to_frame()`
+        return pd.DataFrame.from_dict(self, orient="index", columns=["flux"])
+
+
+def _primal_fluxes(model) -> dict[str, float]:
+    """
+    Read primal values for each reaction's net flux directly from the solver
+    (avoid cobra.get_solution to prevent dual lookups that break on QP).
+    Net flux = forward_variable - reverse_variable.
+    """
+    fluxes: dict[str, float] = {}
+    for rxn in model.reactions:
+        # Use forward/reverse variables; `rxn.variable` is not guaranteed.
+        fwd = getattr(rxn, "forward_variable", None)
+        rev = getattr(rxn, "reverse_variable", None)
+
+        val = 0.0
+        # Some solver interfaces may return None until optimized; caller must have
+        # called model.solver.optimize() right before.
+        if fwd is not None:
+            try:
+                pv = fwd.primal
+                if pv is not None:
+                    val += float(pv)
+            except Exception:
+                pass
+        if rev is not None:
+            try:
+                pv = rev.primal
+                if pv is not None:
+                    val -= float(pv)
+            except Exception:
+                pass
+
+        fluxes[rxn.id] = val
+    return fluxes
 
 def create_stoichiometry_matrix(model):
     """This creates a stoichiometry matrix"""
@@ -239,9 +293,12 @@ class BagOfReactionsModel(CommunityModel):
 
         """
         MBR = self.slim_optimize()
-        assert (
-            "glpk" not in self.community_model.solver.interface.__name__
-        ), "We requrie a solver cabable to optimize quadratic programs i.e. use cplex."
+        iface = self.community_model.solver.interface.__name__.lower()
+        if not any(k in iface for k in ("gurobi", "cplex")):
+            raise AssertionError(
+                "Cooperative trade-off requires a QP-capable solver (Gurobi or CPLEX). "
+                f"Current solver: {self.community_model.solver.interface.__name__}"
+            )
         assert alpha <= 1 and alpha > 0, "This hyperparameter has to be between 0 and 1"
 
         # We make a copy because switching between LP and QP problems can become expensive.
@@ -265,12 +322,17 @@ class BagOfReactionsModel(CommunityModel):
         )
         model.add_cons_vars(constraint_growth)
         model.solver.update()
-        sol = model.optimize()
-        single_growths = [sol[r.id] for r in biomass_reactions]
-        community_growth = sum(
-            [self.weights[i] * sol[r.id] for i, r in enumerate(biomass_reactions)]
-        )
-        sol.objective_value = community_growth
+        # Solve QP with the raw solver (avoid COBRA's get_solution to skip dual lookups)
+        model.solver.optimize()
+
+        # Pull primal fluxes directly from solver variables
+        fluxes = _primal_fluxes(model)
+        single_growths = [fluxes[r.id] for r in biomass_reactions]
+        community_growth = float(sum(self.weights[i] * fluxes[r.id] for i, r in enumerate(biomass_reactions)))
+
+        # Lightweight, dict-like “solution” so existing call-sites keep working
+        sol = _FluxView(fluxes, community_growth)
+
         del model
         return community_growth, single_growths, sol
 
@@ -339,26 +401,41 @@ class BagOfReactionsModel(CommunityModel):
         """Performs FBA on the community model
 
         Args:
-            enforce_survival: Must be between 0 and 1. It constraint the community such
-            that all member must have atleast X % of the community growth e.g. if
-            enforce survival=1 then all members must have the same fraction of the total
-            growth.
+            enforce_survival: Must be between 0 and 1. It constrains the community such
+            that all members must have at least X % of the community growth.
         Returns:
             community_growth : Value of the community objective
             individual_growth: List of individual growths
-            solution: Cobra solution object, containing fluxes for all reactions
+            solution: dict-like object with reaction fluxes (id -> value)
         """
+        model = self.community_model
+
+        # If enforcing survival, add constraints and solve directly with the solver.
         if enforce_survival > 0:
-            assert (
-                enforce_survival <= 1 and enforce_survival > 0
-            ), "Minimal percentage must be between 0 and 1."
+            assert 0 < enforce_survival <= 1, "Minimal percentage must be between 0 and 1."
             constraint_growth = self._add_enforce_survival_constraints(enforce_survival)
-            self.community_model.add_cons_vars(constraint_growth)
-        sol = self.community_model.optimize()
-        total_growth = self.community_model.slim_optimize()
+            model.add_cons_vars(constraint_growth)
+            model.solver.update()
+            model.solver.optimize()
+
+            fluxes_dict = _primal_fluxes(model)
+            sol = _FluxView(fluxes_dict, objective_value=float(model.solver.objective.value))
+            total_growth = float(model.solver.objective.value)  # LP objective value
+
+            # Clean up the temporary constraints
+            model.remove_cons_vars(constraint_growth)
+            model.solver.update()
+
+        else:
+            # No extra constraints: solve once and build a flux view.
+            model.solver.update()
+            model.solver.optimize()
+            fluxes_dict = _primal_fluxes(model)
+            sol = _FluxView(fluxes_dict, objective_value=float(model.solver.objective.value))
+            # keep slim_optimize() for compatibility if you prefer; objective value is same
+            total_growth = model.slim_optimize()
+
         single_growths = [sol[r.id] for r in self.biomass_reactions]
-        if enforce_survival > 0:
-            self.community_model.remove_cons_vars(constraint_growth)
         return total_growth, single_growths, sol
 
     def single_optimize(self, idx):

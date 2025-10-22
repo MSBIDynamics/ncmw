@@ -118,29 +118,98 @@ def load_old_configs(community_folder:str, cfg:str) -> DictConfig:
         pickle.dump(cfg, f)
     return old_cfg
 
-def set_solver_disable_functionalities_if_needed(cfg:DictConfig, log:logging.Logger) -> DictConfig:
-    """This will set the solver to cplex, the default we recommend for this task.
-    Otherwise it will disable some functionality, which we encountered to be not
-    supported/hard for other solvers
-    
-    
-    
+def _as_flux_df(view):
+    """
+    Return a DataFrame with a single column 'fluxes' indexed by reaction id,
+    regardless of whether `view` has .to_frame() or is dict/FluxView-like.
+    """
+    if hasattr(view, "to_frame"):
+        df = view.to_frame()
+        # make sure the expected column name exists
+        if "fluxes" not in df.columns and df.shape[1] == 1:
+            df.columns = ["fluxes"]
+        return df
+
+    # Try mapping-like
+    try:
+        items = list(view.items())
+    except Exception:
+        # Some FluxView variants expose .fluxes (mapping)
+        items = list(getattr(view, "fluxes").items())
+
+    import pandas as pd  # safe; already imported at top, but ok if present
+    df = pd.DataFrame(items, columns=["reaction", "fluxes"]).set_index("reaction")
+    return df
+
+
+def set_solver_disable_functionalities_if_needed(cfg: DictConfig, log: logging.Logger) -> DictConfig:
+    """Pick the best available solver and disable unsupported features if needed.
+
+    Preference order: GUROBI → CPLEX → GLPK → GLPK-Exact → SCIPY.
+    - Sets cobra.Configuration().solver to the first available option.
+    - Stores the chosen solver name in cfg.solver for downstream logging.
+    - Disables features known to be unsupported/slow on non-Gurobi/Cplex solvers:
+      * compute_community_fva
+      * cooperative_tradeoff
+
     Args:
-        cfg: Config file
-        log: Logger to return logs.
-    
+        cfg: Hydra config object.
+        log: Logger.
+
     Returns:
-        DictConfig: Updated configs
-    
+        DictConfig: Updated config (with cfg.solver set and features possibly disabled).
     """
     cobra_config = cobra.Configuration()
-    try: 
-        cobra_config.solver = "cplex"
-    except Exception as e:
-        log.warn(f"We recommend cplex as solver, but it seems to be not installed on your system. We disable, cooperative tradeoff and community fva for other solvers. The error was {e}")
-    
-        cfg.community.compute_community_fva = False
-        cfg.community.cooperative_tradeoff = False
+    fallback_order = ["gurobi", "cplex", "glpk", "glpk_exact", "scipy"]
+
+    chosen = None
+    last_err = None
+    for s in fallback_order:
+        try:
+            cobra_config.solver = s
+            chosen = s
+            break
+        except Exception as e:
+            # Keep the log style you were using earlier
+            name = s.upper()
+            if s in ("gurobi", "cplex"):
+                log.info(f"{name} unavailable ({e}). Trying next...")
+            last_err = e
+
+    if chosen is None:
+        raise RuntimeError(
+            f"No supported solver available. Tried: {', '.join(fallback_order)}. "
+            f"Last error: {last_err}"
+        )
+
+    # Persist the choice in cfg.solver (handle struct mode safely)
+    try:
+        cfg.solver = chosen
+    except Exception:
+        OmegaConf.set_struct(cfg, False)
+        cfg.solver = chosen
+        OmegaConf.set_struct(cfg, True)
+
+    # Announce choice in the same voice as your current logs
+    if chosen == "gurobi":
+        log.info("Using GUROBI solver.")
+    elif chosen == "cplex":
+        log.info("Using CPLEX solver.")
+    elif chosen == "glpk_exact":
+        log.info("Using GLPK-Exact solver.")
+    elif chosen == "glpk":
+        log.info("Using GLPK solver.")
+    else:
+        log.info("Using SCIPY solver.")
+
+    # Only Gurobi/CPLEX keep all features enabled
+    if chosen not in ("gurobi", "cplex"):
+        if getattr(cfg.community, "compute_community_fva", False):
+            log.warning(f"Disabling compute_community_fva for solver {chosen.upper()}.")
+            cfg.community.compute_community_fva = False
+        if getattr(cfg.community, "cooperative_tradeoff", False):
+            log.warning(f"Disabling cooperative_tradeoff for solver {chosen.upper()}.")
+            cfg.community.cooperative_tradeoff = False
 
     return cfg
     
@@ -304,7 +373,19 @@ def flux_analysis(community_model, models, medium_name, cfg, log, PATH, path_to_
     df_growth_summary = pd.DataFrame()
 
     if cfg.community.compute_community_fva:
+        # On Windows with Gurobi, parallel FVA (processes>1) can break due to LP serialization.
+        try:
+            import platform
+            iface = getattr(getattr(community_model, "community_model", community_model).solver.interface, "__name__", "").lower()
+            if platform.system() == "Windows" and "gurobi" in iface:
+                if getattr(cfg.community.community_fva_params, "processes", 1) != 1:
+                    log.warning("Forcing FVA to run single-process on Windows + Gurobi to avoid LP read errors.")
+                    cfg.community.community_fva_params.processes = 1
+        except Exception:
+            pass
+
         log.info("Computing FVA")
+
         fraction_of_optimal = cfg.community.cooperative_tradeoff_params["alpha"]
         try:
             # This may fail for several numerical reasions -> Infeasible Error from solver.
@@ -331,36 +412,47 @@ def flux_analysis(community_model, models, medium_name, cfg, log, PATH, path_to_
     )
     df_growth_summary["Weights"] = list(community_model.weights) + [None]
     df_growth_summary["FBA Growth"] = single_growths + [growth]
-    df_fba = sol.to_frame()
-    # Cooperative tradeoff results if necessray
-    if cfg.community.cooperative_tradeoff:
+    df_fba = _as_flux_df(sol)
+    # Cooperative tradeoff results (only if solver is QP-capable)
+    iface = getattr(
+        getattr(community_model, "community_model", community_model).solver.interface,
+        "__name__",
+        ""
+    ).lower()
+    qp_ok = ("gurobi" in iface) or ("cplex" in iface)
+
+    if cfg.community.cooperative_tradeoff and not qp_ok:
+        log.warning(
+            "Skipping cooperative_tradeoff: solver '%s' is not QP-capable (requires Gurobi or CPLEX).",
+            iface,
+        )
+        df_fba_cooperative_tradeoff = None
+    elif cfg.community.cooperative_tradeoff:
         (
             growth_tradeoff,
             single_growths_tradeoff,
             sol_tradeoff,
         ) = community_model.cooperative_tradeoff(**cfg.community.cooperative_tradeoff_params)
-   
-        log.info(
-            f"Achieved community growth with cooperative tradeoff:{growth_tradeoff}, with individual growth: {single_growths_tradeoff}"
-        )
-    
-        df_growth_summary[
-            "Cooperative tradeoff Growth"
-        ] = single_growths_tradeoff + [growth_tradeoff]
 
-        df_fba_cooperative_tradeoff = sol_tradeoff.to_frame()
+        log.info(
+            "Achieved community growth (cooperative tradeoff): %s, with individual growth: %s",
+            growth_tradeoff, single_growths_tradeoff,
+        )
+        df_growth_summary[f"Cooperative tradeoff (alpha: {cfg.community.cooperative_tradeoff_params.alpha})"] = single_growths_tradeoff + [growth_tradeoff]
+        df_fba_cooperative_tradeoff = _as_flux_df(sol_tradeoff)
+
 
     df_growth_summary.index = [m.id for m in models] + ["Community growth"]
     df_growth_summary.to_csv(path_to_save + SEPERATOR + f"growth_analysis.csv")
 
     
     
-
     df_fva["FBA"] = df_fba["fluxes"]
-    if cfg.community.cooperative_tradeoff:
+    if cfg.community.cooperative_tradeoff and df_fba_cooperative_tradeoff is not None:
         df_fva[
-        f"Cooperative tradeoff (alpha: {cfg.community.cooperative_tradeoff_params.alpha}"
+            f"Cooperative tradeoff (alpha: {cfg.community.cooperative_tradeoff_params.alpha})"
         ] = df_fba_cooperative_tradeoff["fluxes"]
+    # else: tradeoff skipped (non-QP solver) — nothing to add
 
     log.info("Saving all flux analysis")
     df_fva.to_csv(path_to_save + SEPERATOR + f"flux_analysis.csv")
@@ -381,18 +473,36 @@ def community_flux_summary(community_model, cfg, path_to_save):
     fig = plot_community_summary(community_model, summary_1, cfg.visualization.names)
     fig.savefig(path_to_save + SEPERATOR + f"community_summary.pdf")
 
+    summary_2 = None
     if cfg.community.cooperative_tradeoff:
-        summary_2 = community_model.summary(
-            cooperative_tradeoff=cfg.community.cooperative_tradeoff_params[
-                "alpha"
-            ]
-        )
-        summary_2.to_csv(path_to_save + SEPERATOR + f"flux_summary_cooperative_tradeoff.csv")
-        fig = plot_community_summary(community_model, summary_2, cfg.visualization.names)
-        fig.savefig(path_to_save + SEPERATOR + f"community_summary_cooperative_tradeoff.pdf")
-        return summary_1, summary_2
+        # Only attempt QP if the current optlang interface is gurobi or cplex
+        iface = getattr(
+            getattr(community_model, "community_model", community_model).solver.interface,
+            "__name__",
+            ""
+        ).lower()
+        qp_capable = ("gurobi" in iface) or ("cplex" in iface)
+        if qp_capable:
+            summary_2 = community_model.summary(
+                cooperative_tradeoff=cfg.community.cooperative_tradeoff_params["alpha"]
+            )
+            summary_2.to_csv(path_to_save + SEPERATOR + "flux_summary_cooperative_tradeoff.csv")
 
-    return summary_1, None
+            # Only plot if there is at least one data column (everything except the last “Total exchange” column)
+            if (summary_2 is not None) and (not summary_2.empty) and (len(summary_2.columns) > 1):
+                fig = plot_community_summary(community_model, summary_2, cfg.visualization.names)
+                fig.savefig(path_to_save + SEPERATOR + "community_summary_cooperative_tradeoff.pdf")
+            else:
+                logging.getLogger(__name__).warning(
+                    "Skipping cooperative_tradeoff plot: no data to plot (empty/degenerate summary)."
+                )
+        else:
+            logging.getLogger(__name__).warning(
+                "Skipping cooperative_tradeoff in community_flux_summary: "
+                f"solver '{iface}' is not QP-capable (requires Gurobi or CPLEX)."
+            )
+
+    return summary_1, summary_2
 
 def run_community(cfg: DictConfig) -> None:
     log = logging.getLogger(__name__)
@@ -520,7 +630,7 @@ def run_community(cfg: DictConfig) -> None:
                 )
                 fig.savefig(path_to_save + SEPERATOR + "species_interaction.pdf", bbox_inches="tight")
 
-                if cfg.community.cooperative_tradeoff:
+                if cfg.community.cooperative_tradeoff and (summary_2 is not None):
                     fig = plot_community_interaction(
                         m, summary_2, names=cfg.visualization.names
                     )
