@@ -135,5 +135,6 @@ outputs
 .vscode/
 .vscode
 .venv311
+.idea/
 
 
