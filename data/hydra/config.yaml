@@ -1,9 +1,10 @@
 name: "default_project_name" # Name of the outputfolder
 seed: 1 # Random seed
 eps: 0.01  # Value at which a model is consider to have zero growth
-run_setup: True 
+run_setup: True
 run_analysis: True
 run_community: True
+run_host: True            # only used by the full `ncmw` pipeline
 overwrite_all: False # We check if we already computed something, if this is set to True everything is recomputed
 hydra/output_subdir: null
 
@@ -11,4 +12,6 @@ defaults:
   - setup: setup
   - analysis: analysis
   - community: community
+  - host: host              # loads data/hydra/host/host.yaml into cfg.host
   - visualization: visualization
+  - _self_

@@ -1,0 +1,26 @@
+# Merged into cfg.host
+
+# Path to the host model file (relative to data/models or absolute).
+# For now you can use an existing model just to make it run:
+host_model_file: "iAG781_SNM3.xml"
+
+# Where under results/<project_name>/ to store host outputs
+output_subdir: "host"
+
+# Structure of the host + lumen model
+add_lumen_compartment: true
+host_compartment_id: "h"
+lumen_compartment_id: "lu"
+external_compartment_id: "e"
+
+host_lumen_transport:
+  enabled: true
+  default_bound: 1000.0
+
+# Analysis options
+run_fba: true
+write_sbml: true
+write_summary: true
+
+# If you know the biomass reaction id, put it here; otherwise we try to guess
+biomass_reaction_id: null
