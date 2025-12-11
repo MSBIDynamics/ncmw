@@ -1,26 +1,38 @@
 # Merged into cfg.host
 
 # Path to the host model file (relative to data/models or absolute).
-# For now you can use an existing model just to make it run:
 host_model_file: "iAG781_SNM3.xml"
 
 # Where under results/<project_name>/ to store host outputs
 output_subdir: "host"
 
-# Structure of the host + lumen model
+# ---- NEW: coupling to community model ----
+# If true, we build a combined Host+Community model instead of host-only.
+couple_to_community: true
+
+# Path of the community model *relative to* results/<project_name>/.
+# This matches where NCMW saves the ShuttleCommunityModel:
+#   results/<project>/community/community_models/ShuttleCommunityModel.xml
+community_model_file: "community/community_models/ShuttleCommunityModel.xml"
+
+# (Optional hook if you later want to support hierarchical, etc.)
+community_model_type: "shuttle"
+
+# ---- Host + lumen structure ----
 add_lumen_compartment: true
 host_compartment_id: "h"
-lumen_compartment_id: "lu"
+lumen_compartment_id: "external"
 external_compartment_id: "e"
+community_external_compartment_id: "external"
+
 
 host_lumen_transport:
   enabled: true
   default_bound: 1000.0
 
-# Analysis options
+# ---- Analysis options ----
 run_fba: true
 write_sbml: true
 write_summary: true
 
-# If you know the biomass reaction id, put it here; otherwise we try to guess
-biomass_reaction_id: null
+biomass_reaction_id: "Growth"
