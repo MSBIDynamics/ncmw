@@ -6,8 +6,7 @@ host_model_file: "iAG781_SNM3.xml"
 # Where under results/<project_name>/ to store host outputs
 output_subdir: "host"
 
-# ---- NEW: coupling to community model ----
-# If true, we build a combined Host+Community model instead of host-only.
+# ---- Coupling to community model ----
 couple_to_community: true
 
 # Path of the community model *relative to* results/<project_name>/.
@@ -15,18 +14,51 @@ couple_to_community: true
 #   results/<project>/community/community_models/ShuttleCommunityModel.xml
 community_model_file: "community/community_models/ShuttleCommunityModel.xml"
 
-# (Optional hook if you later want to support hierarchical, etc.)
+# Optional hook for later (not used yet)
 community_model_type: "shuttle"
 
-# ---- Host + lumen structure ----
-add_lumen_compartment: true
+# ---- Compartments (paper-like topology) ----
+# host SBML cytosol compartment id (keep as you had)
 host_compartment_id: "h"
-lumen_compartment_id: "external"
+
+# host SBML's original external compartment id
 external_compartment_id: "e"
+
+# NEW: host extracellular compartment (separate from community external)
+host_extracellular_compartment_id: "he"
+
+# NEW: lumen compartment (shared "in silico lumen")
+lumen_compartment_id: "lu"
+
+# community external compartment id used by your community SBML
 community_external_compartment_id: "external"
 
+# ---- Build switches ----
+add_lumen_compartment: true
 
+# ---- Host extracellular <-> lumen shuttles (bounded supply!) ----
 host_lumen_transport:
+  enabled: true
+
+  # Host is a constrained supplier:
+  # Positive flux = host extracellular -> lumen
+  max_secretion: 10.0
+
+  # Negative flux = lumen -> host extracellular
+  # Start with 0.0 unless you explicitly want host to take from lumen
+  max_uptake: 0.0
+
+  # Backwards compatibility / fallback if you set max_* to null:
+  default_bound: 1000.0
+
+  # Optional: restrict which metabolites the host is allowed to exchange.
+  # If omitted/null => will create shuttles for ALL host-extracellular metabolites (usually too permissive).
+  # allowed_metabolites:
+  #   - "glc__D_e"
+  #   - "lac__L_e"
+
+# ---- Community external <-> lumen mixing (NOT a nutrient source) ----
+community_lumen_transport:
   enabled: true
   default_bound: 1000.0
 
@@ -35,4 +67,7 @@ run_fba: true
 write_sbml: true
 write_summary: true
 
-biomass_reaction_id: "Growth"
+# Objective:
+# If set and exists, it will be used directly.
+# If null, workflow uses sum of all reactions containing "biomass".
+biomass_reaction_id: null
