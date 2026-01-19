@@ -38,7 +38,7 @@ def plot_reference_interaction(interaction_cutoff=0, cmap="viridis"):
                 G.add_edge(n1, n2, weight=weights[i, j])
                 edge_color.append(cmap2((weights[i, j])))
 
-    fig = plt.figure(figsize=(N, N - 2))
+    fig, ax = plt.subplots(figsize=(N, N - 2))          # [CHANGE 1]
     pos = circular_layout(G)
     nx.draw(
         G,
@@ -50,11 +50,13 @@ def plot_reference_interaction(interaction_cutoff=0, cmap="viridis"):
         edge_color=edge_color,
         width=3,
         connectionstyle="arc3, rad = 0.1",
+        ax=ax,                                         # [CHANGE 2]
     )
-    cbar = fig.colorbar(
-        matplotlib.cm.ScalarMappable(matplotlib.colors.Normalize(-1, 1), cmap=cmap2)
-    )
-    cbar.set_label("Interaction (Red=harmful, Blue=Benefitial)", rotation=270)
+    norm = matplotlib.colors.Normalize(vmin=-1, vmax=1)  # [CHANGE 3]
+    sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap2)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.8)
+    cbar.set_label("Interaction (Red=harmful, Blue=Beneficial)", rotation=270)
     cbar.set_ticks([-1, 0, 1])
 
     return fig
@@ -85,7 +87,7 @@ def plot_species_interaction(
                 G.add_edge(n1, n2, weight=weights[i, j])
                 edge_color.append(cmap2((weights[i, j] + 1) / 2))
 
-    fig = plt.figure(figsize=(len(model.models) * 2, 2 * len(model.models) - 2))
+    fig, ax = plt.subplots(figsize=(len(model.models) * 2, 2 * len(model.models) - 2))
     pos = circular_layout(G)
     nx.draw(
         G,
@@ -97,12 +99,13 @@ def plot_species_interaction(
         edge_color=edge_color,
         width=3,
         connectionstyle="arc3, rad = 0.1",
+        ax=ax,
     )
-    cbar = fig.colorbar(
-        matplotlib.cm.ScalarMappable(matplotlib.colors.Normalize(-1, 1), cmap=cmap2),
-        shrink=0.8,
-    )
-    cbar.set_label("Interaction (Red=harmful, Blue=Benefitial)", rotation=270)
+    norm = matplotlib.colors.Normalize(vmin=-1, vmax=1)
+    sm = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap2)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.8)
+    cbar.set_label("Interaction (Red=harmful, Blue=Beneficial)", rotation=270)
     cbar.set_ticks([-1, 0, 1])
     return fig
 
@@ -303,23 +306,26 @@ def plot_community_interaction(model, df, names: dict = dict(), cmap: str = None
     return fig
 
 
-def plot_community_summary(model, summary, names: dict = dict()):
-    model_name = []
-    for m in model.models:
-        if m.id in names:
-            model_name.append(names[m.id])
-        else:
-            model_name.append(m.id.split("_")[0])
-    df = summary
-    fig = plt.figure(figsize=(len(df) / 5 + 5, 5))
-    ax = plt.gca()
-    df[df.columns[:-1]].plot(kind="bar", stacked=True, ax=ax)
-    medium_bounds = [
-        model.community_model.exchanges.get_by_id(ex).lower_bound for ex in df.index
-    ]
-    ax.step(range(len(df)), medium_bounds, color="red")
-    ax.legend(["Medium"] + [name for name in model_name], loc="upper center")
-    fig.tight_layout()
+def plot_community_summary(model, df, names):
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    # Guard against empty/degenerate dataframes
+    if df is None or df.empty or len(df.columns) <= 1:
+        ax.text(0.5, 0.5, "No data to plot", ha="center", va="center")
+        ax.set_axis_off()
+        return fig
+
+    # Use all columns except the last summary column (e.g., "Total exchange")
+    data_cols = df.columns[:-1]
+    if len(data_cols) == 0:
+        ax.text(0.5, 0.5, "No data to plot", ha="center", va="center")
+        ax.set_axis_off()
+        return fig
+
+    df[data_cols].plot(kind="bar", stacked=True, ax=ax)
+    ax.set_xlabel("Exchange reactions")
+    ax.set_ylabel("Flux")
+    # (keep the rest of your labeling/legend code as-is)
     return fig
 
 

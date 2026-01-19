@@ -3,6 +3,7 @@ from typing import List, Tuple
 import numpy as np
 from numpy.typing import ArrayLike as Array
 import pandas as pd
+from cobra.exceptions import OptimizationError
 
 import networkx as nx
 
@@ -96,7 +97,7 @@ def compute_community_interaction_graph(model, df):
     species_interaction = (help_array.sum(1) + medium_col) < -1e-6
     species_interaction
     df = df[species_interaction]
-    df = df.drop(df.columns[-1], 1)
+    df = df.drop(columns=df.columns[-1])
 
     # Build interaction graph
     G = nx.DiGraph()
@@ -193,7 +194,11 @@ def compute_pairwise_growth_relation_per_weight(
     growth2 = np.zeros(h)
     for i in range(h):
         community_model.weights = alpha_weights[i]
-        _, single_growths, _ = community_model.optimize()
+        try:
+            _, single_growths, _ = community_model.optimize()
+        except OptimizationError:
+            # Keep lengths consistent with `h` to avoid plotting mismatches.
+            return alpha, np.full(h, np.nan), np.full(h, np.nan)
         growth1[i] = single_growths[idx1]
         growth2[i] = single_growths[idx2]
     return alpha, growth1, growth2

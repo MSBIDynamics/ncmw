@@ -5,6 +5,8 @@ import pandas as pd
 
 import subprocess
 from warnings import warn
+import tempfile, os
+from cobra.io import save_json_model, load_json_model
 
 from ncmw.utils import (
     get_default_configs,
@@ -12,6 +14,27 @@ from ncmw.utils import (
     get_biomass_reaction,
     DATA_PATH,
 )
+
+def _safe_model_clone(m):
+    fd, path = tempfile.mkstemp(suffix=".json"); os.close(fd)
+    try:
+        save_json_model(m, path)
+        return load_json_model(path)
+    finally:
+        try: os.remove(path)
+        except OSError: pass
+        
+def _monkeypatch_model_copy_for_fastcc():
+    def _safe_copy(self):
+        fd, path = tempfile.mkstemp(suffix=".json"); os.close(fd)
+        try:
+            save_json_model(self, path)
+            return load_json_model(path)
+        finally:
+            try: os.remove(path)
+            except OSError: pass
+    # Ensure COBRA internals use a safe copy during fastcc
+    Model.copy = _safe_copy
 
 
 def gapfill_model(
@@ -31,7 +54,7 @@ def gapfill_model(
         Model: Cobra model that has growth if algorithm succeeds
         list: List of reactions that were added
     """
-    model = model.copy()
+    model = _safe_model_clone(model)
     growth = model.slim_optimize()
     if growth > eps:
         # Already has growth gapfilling is unnecessary
@@ -57,11 +80,11 @@ def gapfill_model(
         solution = cobra.flux_analysis.gapfill(
             model, fill_model, demand_reactions=demand_reactions, **kwargs
         )[-1]
-        filled_model = model.copy()
+        filled_model = _safe_model_clone(model)
         filled_model.add_reactions(solution)
     except:
         warn("The model still has no growth... . We try an alternative")
-        filled_model = model.copy()
+        filled_model = _safe_model_clone(model)
         _, rec = gapfill_medium(model)
 
         try:
@@ -107,7 +130,8 @@ def gapfill_medium(model: Model, eps: float = 1e-1) -> Tuple[Model, List]:
         Model: Cobra model with extended medium
         list: List of extended metabolites
     """
-    model_help = model.copy()
+    model_help = _safe_model_clone(model)
+
     try:
         if model_help.slim_optimize() > eps:
             # Already feasible model.
@@ -300,5 +324,6 @@ def fastcc(model: Model) -> Model:
     Returns:
         cobra.core.Model: Returns a more consistent cobra model.
     """
+    _monkeypatch_model_copy_for_fastcc()
     consistent_model = cobra.flux_analysis.fastcc(model)
     return consistent_model
